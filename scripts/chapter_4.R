@@ -8,6 +8,8 @@
 
 library(tidyverse)
 library(rethinking)
+library(showtext)
+library(tidybayes)
 
 # load data ------------------------------------------------------------------
 
@@ -22,6 +24,25 @@ glimpse(howell)
 # precis summary from rethinking, includes nice little histograms
 precis(howell)
 
+
+# create plot theme -------------------------------------------------------
+
+font_add_google('Bungee Shade', 'bun')
+font_add_google('Noto Sans', 'ns')
+
+showtext_auto()
+
+chap_4_theme <- function() {
+  theme_bw() +
+    theme(
+      panel.grid = element_blank(),
+      panel.border = element_blank(),
+      axis.line = element_line(linewidth = .75, color = 'black'), 
+      axis.ticks = element_line(linewidth = .5, color = 'grey30'), 
+      axis.text = element_text(family = 'ns', size = 12), 
+      axis.title = element_text(color = 'dodgerblue3', family = 'bun', size = 14)
+    )
+}
 
 # 4.1 ---------------------------------------------------------------------
 
@@ -111,6 +132,278 @@ tibble(
 
 # 4.3 --------------------------------------------------------------------
 
-# filter out children, where age confounds with height
+# filter out children, where age confounds with height to create exponential
 howell <- howell |> 
   filter(age >= 18)
+
+# plot the distribution of heights
+dens(howell$height)
+
+howell |> 
+  ggplot(aes(x = height)) +
+  geom_density(fill = 'grey80', color = 'grey80') +
+  chap_4_theme()
+
+# gawking at the outcome distribution of your model isn't the best way to choose
+# or justify your model. linear models don't need normality to est mean/variance
+
+
+# .2 model and priors -----------------------------------------------------
+
+
+# assume heights are independently and identically distributed, or that each value
+# of h has the same probability function. untrue in most cases, which is where 
+# multilevel analyses come into play
+
+# here we want to estimate the mean and variance of a single variable like an 
+# intercept only model (single t in traditional stats terms). 
+
+#' hi ~ Normal(mu, sigma) rank rel plausibility of different height distributions
+#' mu ~ Normal(178, 20) average for height likely around 178 cm
+#' sigma ~ Uniform(0, 50) variance must be positive, and likely not that high
+
+# these priors are determined from our prior knowledge of how these variables 
+# tend to be distributed. like mean height being around 5'8", within +/- 1.3 ft
+
+# plot prior
+tibble(x = seq(from = 100, to = 250, by = .1)) |> 
+  ggplot(aes(x = x, y = dnorm(x, mean = 178, sd = 20))) +
+  geom_line() +
+  labs(y = 'density') +
+  chap_4_theme()
+
+tibble(x = seq(from = -10, to = 60, by = .1)) |> 
+  ggplot(aes(x = x, y = dunif(x, min = 0, max = 50))) +
+  geom_line() +
+  labs(y = 'density') +
+  chap_4_theme()
+
+# can simulate from both priors at once to get a prior predictive distribution
+# which will help us see if our choices for priors make sense
+
+n <- 1e4
+set.seed(4)
+
+# sample from each prior, then use those samples to draw sample for height
+sim <- tibble(
+  sample_mu = rnorm(n, mean = 178, sd = 20), 
+  sample_sigma = runif(n, min = 0, max = 50)
+) |> 
+  mutate(
+    height = rnorm(n, mean = sample_mu, sd = sample_sigma)
+  )
+
+# plot
+sim |> 
+  ggplot(aes(x = height)) +
+  geom_density(fill = 'grey80') +
+  scale_y_continuous(NULL, breaks = NULL) +
+  chap_4_theme()
+
+# most likely to see height around prior mean, constrained within sensible range
+# (no negative heights)
+
+# if we described a different prior, can see resulting prior predictive can be 
+# non sensical
+text <- tibble(
+  height = 272 - 25,
+  y = 0.0013,
+  label = "tallest man",
+  angle  = 90
+)
+
+tibble(
+  sample_mu = rnorm(n, 178, 100), # absurdly large variance for heights
+  sample_sigma = runif(n, 0, 50)
+) |> 
+  mutate(
+    height = rnorm(n, sample_mu, sample_sigma)
+  ) |> 
+  ggplot(aes(x = height)) +
+  geom_density(fill = 'dodgerblue', color = NA) +
+  geom_vline(xintercept = 0, linetype = 3, color = 'black') + # mark 0
+  geom_vline(xintercept = 272, color = 'red3', linetype = 3) + # mark wadlow
+  geom_text(
+    data = text, aes(y = y, label = label, angle = angle), 
+    color = 'red4'
+  ) +
+  scale_y_continuous(NULL, breaks = NULL) +
+  chap_4_theme()
+  
+# the model before seeing the data now expects a lot of people to have negative
+# heights and even more to be taller than robert wadlow
+
+
+# .3 grid approximation of posterior --------------------------------------
+
+
+# use grid approximation to estimate the posterior distribution of height dist. 
+# would never use this for real analysis bc coding is intractable and time sink
+n <- 200
+
+# create grid of mean and variance values to test
+# crossing() is tidyverse version of expand.grid()
+d_grid <- crossing(
+  mu = seq(from = 140, to = 160, length.out = n), 
+  sigma = seq(from = 4, to = 9, length.out = n)
+)
+
+# for each mu, there are 200 values of sigma to consider
+glimpse(d_grid)
+
+# grid approx function for likelihood
+grid_function <- function(mu, sigma, d = howell) {
+  # get post prob from data for this comb of mu/sigma, log then sum bc more 
+  # computationally efficient than multiplying this many numbers
+  dnorm(d$height, mean = mu, sd = sigma, log = T) |> 
+    sum()
+}
+
+# grid approx
+d_grid <- d_grid |> 
+  mutate(
+    log_likelihood = map2(mu, sigma, grid_function)
+  ) |> 
+  unnest(log_likelihood) |> 
+  mutate(
+    prior_mu = dnorm(mu, 178, 20, log = T), 
+    prior_sigma = dunif(sigma, 0, 50, log = T)
+  ) |> 
+  mutate(
+    product = log_likelihood + prior_mu + prior_sigma
+  ) |> 
+  mutate(
+    probability = exp(product - max(product))
+  )
+
+# now we have posterior probabilities across all values sampled of mu and sigma
+# view posterior w contour plot or raster heatmap
+d_grid |> 
+  ggplot(aes(x = mu, y = sigma, fill = probability)) +
+  geom_raster(interpolate = T) +
+  scale_fill_viridis_c(option = 'magma') +
+  coord_cartesian(xlim = range(d_grid$mu), ylim = range(d_grid$sigma)) +
+  chap_4_theme()
+
+# most of the probability centers around mean of 154 w variance of 7.5
+
+# rather than viewing posterior, usually we draw samples from it 
+d_grid_samples <- d_grid |> 
+  sample_n(size = 1e4, replace = T, weight = probability)
+
+d_grid_samples |> 
+  ggplot(aes(x = mu, y = sigma)) +
+  geom_point(size = .9, alpha = 1/15) +
+  labs(
+    x = expression('mu'[samples]), 
+    y = expression('sigma'[samples])
+  ) +
+  chap_4_theme()
+
+# here we see the shadow of each posterior distribution cast onto the plot
+# see the individual or marginal distributions
+d_grid_samples |> 
+  pivot_longer(mu:sigma) |> 
+  ggplot(aes(x = value)) +
+  geom_density(fill = 'grey40') +
+  scale_y_continuous(NULL, breaks = NULL) +
+  xlab(NULL) +
+  chap_4_theme() +
+  facet_wrap(~ name, scales = 'free', labeller = label_parsed)
+
+# compute posterior modes and 95% highest density intervals from samples
+d_grid_samples |> 
+  pivot_longer(mu:sigma) |> 
+  group_by(name) |> 
+  mode_hdi(value) # mode hdi
+
+# or post medians and 50% quantile interval
+d_grid_samples |> 
+  pivot_longer(mu:sigma) |> 
+  group_by(name) |> 
+  median_qi(value) # mode hdi
+
+
+# .3 approx w brm ---------------------------------------------------------
+
+# while great for learning and teaching, we approximate the posterior w more 
+# sensible methods like brm and quap
+
+# detach rethinking to avoid namespace clashes
+detach(package:rethinking, unload = T)
+library(brms)
+
+b4.1 <- brm(
+  data = howell, 
+  family = gaussian, 
+  height ~ 1, # only est mean and variance
+  prior = c(
+    prior(normal(178, 20), class = Intercept), 
+    prior(uniform(0, 50), class = sigma, ub = 50)
+  ), 
+  iter = 2000, warmup = 1000, chains = 4, cores = 4, 
+  seed = 4, 
+  file = 'fits/b_4.01'
+)
+
+# or read in
+b4.1 <- read_rds('fits/b_4.01.rds')
+
+# view sampling results
+plot(b4.1)
+
+# similar marginal posteriors to grid, chains appear to have good convergence
+
+# get the model summary
+print(b4.1)
+
+# stan-like summary
+b4.1$fit
+
+
+# .4 sampling from brm fit ------------------------------------------------
+
+# variance covariance matrix is glue that holds together quap, like ML methods, 
+# info is stored within the matrix to determine how far up that MAP hill we are
+
+# from brm fit, we should extract samples to calculate this
+post <- as_draws_df(b4.1)
+
+head(post)
+
+# get vcov matrix
+vcov_matrix <- post |> 
+  select(b_Intercept:sigma) |> 
+  cov()
+
+# variances on diag
+diag(vcov_matrix)
+
+# unlike rethinking's extract samples, brm as_draws_df() just pulls iterations
+# from the sampling chains 
+
+# can summarize these samples as marginals
+post |> 
+  pivot_longer(b_Intercept:sigma) |> 
+  group_by(name) |> 
+  summarize(
+    mean = mean(value), 
+    sd = sd(value), 
+    `2.5%` = quantile(value, probs = .025), 
+    `97.5%` = quantile(value, probs = .975)
+  ) |> 
+  mutate_if(is.numeric, round, digits = 2)  |> # round everything
+  mutate(
+    # add cute little histograms
+    histospark = c(
+      rethinking::histospark(post$b_Intercept), 
+      rethinking::histospark(post$sigma)
+    )
+  )
+  
+# or posterior summary
+posterior_summary(b4.1)
+
+# 4.4 linear prediction ---------------------------------------------------
+
+
