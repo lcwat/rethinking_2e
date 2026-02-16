@@ -148,7 +148,7 @@ howell |>
 # or justify your model. linear models don't need normality to est mean/variance
 
 
-# .2 model and priors -----------------------------------------------------
+# .3.2 model and priors -----------------------------------------------------
 
 
 # assume heights are independently and identically distributed, or that each value
@@ -234,7 +234,7 @@ tibble(
 # heights and even more to be taller than robert wadlow
 
 
-# .3 grid approximation of posterior --------------------------------------
+# .3.3 grid approximation of posterior --------------------------------------
 
 
 # use grid approximation to estimate the posterior distribution of height dist. 
@@ -324,7 +324,7 @@ d_grid_samples |>
   median_qi(value) # mode hdi
 
 
-# .3 approx w brm ---------------------------------------------------------
+# .3.4 approx w brm ---------------------------------------------------------
 
 # while great for learning and teaching, we approximate the posterior w more 
 # sensible methods like brm and quap
@@ -361,7 +361,7 @@ print(b4.1)
 b4.1$fit
 
 
-# .4 sampling from brm fit ------------------------------------------------
+# .3.5 sampling from brm fit ------------------------------------------------
 
 # variance covariance matrix is glue that holds together quap, like ML methods, 
 # info is stored within the matrix to determine how far up that MAP hill we are
@@ -406,4 +406,321 @@ posterior_summary(b4.1)
 
 # 4.4 linear prediction ---------------------------------------------------
 
+# most models concerned with how variables covary, now we will add a predictor
+# variable to the model to see how that changes the specification of priors
+
+# we will covary the height with weight of the kalahari foragers, not particularly
+# interesting unless you have a theory about lifespan development
+howell <- howell |> 
+  filter(age >= 18)
+
+# scatterplot
+howell |> 
+  ggplot(aes(x = weight, y = height)) +
+  geom_point(shape = 1, size = 2) +
+  chap_4_theme()
+
+# regression is created when we structure the estimation equation to have the 
+# mean of the Gaussian dist. estimated as a linear function of the predictor
+# the golem assumes the predictor has a constant (linear) and additive relationship
+# to the mean of the outcome
+
+# golem produces posterior, which is relative plausibility of each parameter 
+# combination which represent the strengths of the associations (lines)
+# rank these lines by plausibility given the data P(mu, sigma, beta, alpha | Data)
+
+#' hi ~ N(mui, sigma)  likelihood, prob of each data point
+#' ui = alpha + beta(x - xbar)  beta and alpha param control how much x aff mu
+#'  and is now not estimated but constructed from other estimated param and data
+#' alpha ~ N(178, 20)
+#' beta ~ N(0, 10)
+#' sigma ~ Unif(0, 50)
+
+# alpha and beta manipulate mu, allowing for systematic variation across cases in 
+# the data (subscript i)
+
+# centering x makes interpretation and defintion of prior easier. alpha param is 
+# now the expected height for the average weight mu = alpha 
+# beta is the rate of change in height expectation across weight range
+
+# prior predictive check
+set.seed(4)
+
+n_lines <- 100
+
+# for each simulated data point, draw from priors and assign to extreme weight
+lines <- tibble(
+  n = 1:n_lines, 
+  a = rnorm(n_lines, 178, 20), 
+  b = rnorm(n_lines, 0, 10)
+) |> 
+  expand_grid(weight = range(howell$weight)) |> 
+  mutate(
+    height = a + b * (weight - mean(howell$weight))
+  )
+
+lines
+
+# plot lines with horizontal height ceiling/floor
+lines |> 
+  ggplot(aes(x = weight, y = height, group = n)) +
+  geom_hline(yintercept = c(0, 272), linetype = 2, linewidth = 1/3) +
+  geom_line(alpha = 1/10) +
+  coord_cartesian(ylim = c(-100, 400)) +
+  chap_4_theme()
+
+# this simulation shows how our prior specification, specifically the beta is 
+# creating nonsensical relationships like negative associations between h/w
+
+# so, can try another prior that avoids negative associations like log-normal
+# or logarithm of param has normal dist
+
+tibble(b = rlnorm(1e4, 0, 1)) |> 
+  ggplot(aes(x = b)) +
+  geom_density(fill = 'grey60', color = NA) +
+  coord_cartesian(xlim = c(0, 5)) +
+  chap_4_theme()
+
+# log normal derivation for mu/sigma we defined
+mu = 0
+sigma = 1
+
+# mean
+exp(mu + (sigma^2) / 2)
+
+# sd
+sqrt((exp(sigma^2) - 1) * exp(2 * mu + sigma^2))
+
+# find numerically from simulated draws
+tibble(d = rlnorm(1e7, 0, 1)) |> 
+  summarize(
+    mu = mean(d), 
+    sigma = sd(d)
+  )
+
+# prior predictive will show much better agreement with our prior knowledge
+tibble(
+  n = 1:n_lines, 
+  a = rnorm(n_lines, 178, 20), 
+  b = rlnorm(n_lines, 0, 1)
+) |> 
+  expand_grid(weight = range(howell$weight)) |> 
+  mutate(
+    height = a + b * (weight - mean(howell$weight))
+  ) |> 
+  ggplot(aes(x = weight, y = height, group = n)) +
+  geom_hline(yintercept = c(0, 272), linetype = 3, linewidth = 1/3) +
+  geom_line(alpha = 1/10) +
+  coord_cartesian(ylim = c(-100, 400)) +
+  chap_4_theme()
+
+
+# .4.2 --------------------------------------------------------------------
+
+# fit a new model with predictor to find the posterior
+# create new centered variable
+howell <- howell |> 
+  mutate(
+    weight_c = weight - mean(weight)
+  )
+
+detach(package:rethinking, unload = T)
+library(brms)
+
+b4.3 <- brm(
+  data = howell, 
+  height ~ 1 + weight_c, # centered weight
+  prior = c(
+    prior(normal(178, 20), class = Intercept), 
+    prior(lognormal(0, 1), class = b), 
+    prior(uniform(0, 50), class = sigma, ub = 50)
+  ), 
+  iter = 2000, warmup = 1000, chains = 4, cores = 4, 
+  seed = 4, 
+  file = 'fits/b_4.03'
+)
+
+b4.3 <- read_rds('fits/b_4.03.rds')
+
+plot(b4.3)
+
+# .4.3 --------------------------------------------------------------------
+
+# interpreting the posterior, tables and simulated visuals can describe the 
+# posterior, but it is hard to get the complexity of the model and data that 
+# generated it. how do parameters act together to influence prediction? 
+
+# what do parameters mean? 
+# no consensus on what they mean due to different philosophies toward models, 
+# probabilities, and prediction
+# rethinking: posterior probabilities of param values describe the relative 
+# compatibility of different states of the world with the data, according to the 
+# model
+
+# table
+posterior_summary(b4.3)[1:3,] |> 
+  round(2)
+
+# always consider context of model assumptions
+# if you are committed to a line, then lines with a slope around .9 are plausible
+
+# vcov
+vcov(b4.3) |> 
+  round(3)
+
+# with sigma
+as_draws_df(b4.3) |> 
+  select(b_Intercept:sigma) |> 
+  cov() |> 
+  round(3)
+
+# pairs will plot the marginal posteriors and covariance between them (0 for most)
+pairs(b4.3)
+
+# almost always better to plot the posterior inference against actual data, 
+# helps us interpret the posterior and informally check the model assumptions 
+# (e.g., does linear model capture this relationship?)
+
+# can get the line with fixef()
+labels <- c(-10, 0, 10) + mean(howell$weight) |> # labels for plot in orig scale
+  round(0)
+
+howell |> 
+  ggplot(aes(x = weight_c, y = height)) +
+  geom_abline(
+    intercept = fixef(b4.3)[1], 
+    slope = fixef(b4.3)[2]
+  ) +
+  geom_point(shape = 1, size = 2, color = 'dodgerblue') +
+  scale_x_continuous(
+    'weight', 
+    breaks = c(-10, 0, 10), 
+    labels = labels 
+  ) +
+  chap_4_theme()
+
+# but this is just a line, no uncertainty passed along
+# book features example that shows how drawing lines from posterior with less and
+# less data becomes more uncertain in intercept and slope
+
+# for each parameter value, their combination produces a mu value for height
+# for a particular point of weight (like 50 kg), there is a marginal distribution 
+# of mu that we can get intervals for 
+
+# posterior draws
+post <- as_draws_df(b4.3)
+
+50 - mean(howell$weight)
+
+mu_at_50kg <- post |> 
+  mutate(
+    mu_at_50kg = b_Intercept + b_weight_c * 5.01, 
+    .keep = 'none' # remove all other cols
+  )
+
+mu_at_50kg |> 
+  ggplot(aes(x = mu_at_50kg)) +
+  stat_halfeye(
+    point_interval = mode_hdi, # mode point est
+    .width = .95, # 95% hdi
+    fill = 'dodgerblue'
+  ) +
+  scale_y_continuous(NULL, breaks = NULL) +
+  xlab(expression(mu['height | weight = 50'])) +
+  chap_4_theme()
+
+# at mu = 50, 95% of the posterior lies within the interval of 158.5 and 159.75
+
+# use fitted to get hdi's to plot
+mu <- fitted(b4.3, summary = F)
+
+str(mu) # returns a matrix w as many rows as there was post-warm up draws and 
+# as many cols as cases in the data
+
+# use newdata to pass in custom sequence of values for predictor
+weight_seq <- tibble(weight = 25:70) |> 
+  mutate(weight_c = weight - mean(howell$weight))
+
+mu <- fitted(
+  b4.3, summary = F, newdata = weight_seq
+) |> 
+  data.frame() |> 
+  set_names(25:70) |> # label cols by weights sampled
+  mutate(iter = row_number())
+
+mu <- mu |> 
+  pivot_longer(
+    -iter, 
+    names_to = 'weight', values_to = 'height'
+  ) |> 
+  mutate(weight = as.numeric(weight))
+
+# interval as point cloud, or clumps of points that are each gaussians like 
+# viewing mu at 50kg from above
+howell |> 
+  ggplot(aes(x = weight, y = height)) +
+  geom_point(data = mu |> filter(iter < 101), alpha = .05, color = 'dodgerblue') +
+  coord_cartesian(xlim = c(30, 65)) +
+  chap_4_theme()
+
+# or easier, use summary and PI with ribbons
+mu_summary <- fitted(b4.3, newdata = weight_seq) |> 
+  data.frame() |> 
+  bind_cols(weight_seq)
+
+head(mu_summary)
+
+howell |> 
+  ggplot(aes(x = weight, y = height)) +
+  geom_smooth(
+    data = mu_summary, 
+    aes(y = Estimate, ymin = Q2.5, ymax = Q97.5), 
+    stat = 'identity', 
+    fill = 'grey70', color = 'black', alpha = 1, linewidth = 1/2
+  ) +
+  geom_point(color = 'dodgerblue', shape = 1, linewidth = 1.5, alpha = 2/3) +
+  coord_cartesian(xlim = range(howell$weight)) +
+  chap_4_theme()
+
+# given that we think relationship is a line, this is the most plausible line 
+# and these are the plausible bounds
+
+# prediction intervals 
+# bring in the variability from sigma param, not just mu height samples but actual 
+# heights 
+# instead of plotting uncertainty in line: mu = alpha + beta * weight
+# plot uncertainty in predicted heights: hi ~ Normal(mu, sigma)
+
+# so, for unique values of weight, sample from gaussian with mu and sigma for 
+# that weight
+
+# predict from brms
+pred_height <- predict(b4.3, newdata = weight_seq) |> 
+  data.frame() |> 
+  bind_cols(weight_seq)
+
+pred_height |> 
+  slice(1:6)
+
+# plot everything together
+howell |> 
+  ggplot(aes(x = weight)) +
+  geom_ribbon(
+    data = pred_height, 
+    aes(ymin = Q2.5, ymax = Q97.5), 
+    fill = 'grey83'
+  ) +
+  geom_smooth(
+    data = mu_summary, 
+    aes(y = Estimate, ymin = Q2.5, ymax = Q97.5), 
+    stat = 'identity', 
+    fill = 'grey70', color = 'black', alpha = 1, linewidth = 1/2
+  ) +
+  geom_point(
+    aes(y = height), color = 'dodgerblue', shape = 1, size = 1.5, alpha = 2/3
+  ) +
+  coord_cartesian(xlim = range(howell$weight), ylim = range(howell$height)) +
+  chap_4_theme()
+
+# rough looking, but with more samples in the post-warm up will smooth
 
