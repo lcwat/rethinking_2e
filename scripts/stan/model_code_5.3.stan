@@ -44,6 +44,12 @@ model {
 // generate quantities block: compute log pointwise predictive densities for 
 // model comparison 
 generated quantities {
+  // prediction quantities, without, can't generate fitted values
+  vector[N] linpred = b0 + b1*m + b2*a;
+  vector[N] epred = linpred; // apply link function here if needed
+  array[N] real prediction = normal_rng(epred, sigma);
+  
+  // likelihoods for model comparison
   vector[N] log_lik;
   for(i in 1:N) {
     log_lik[i] = normal_lpdf(d[i] | b0 + b1*m[i] + b2*a[i], sigma);

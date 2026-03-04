@@ -16,6 +16,8 @@ library(tigris)
 library(ggdag)
 library(dagitty)
 library(rethinking)
+library(brms)
+library(ggrepel)
 
 # Drop grid lines
 theme_set(
@@ -334,11 +336,15 @@ stan_data <- d |>
   select(d:a) |>
   compose_data()  
 
+# rename this var N to match stan code
 names(stan_data)[4] <- 'N'
 
-# run cmdstan model
-m5.3 <- cmdstan_model('scripts/stan/model_code_5.3.stan')
+set.seed(5)
 
+# run cmdstan model
+m5.3 <- cmdstan_model('scripts/stan/model_code_5.3.stan') # creates executable file, 1st compilation takes sec, all following are quick!
+
+# sample posterior
 m5.3 <- m5.3$sample(
   stan_data, chains = 2, parallel_chains = 2, iter_warmup = 1500, 
   iter_sampling = 2500
@@ -348,6 +354,7 @@ m5.3 <- m5.3$sample(
 
 # summary
 print(m5.3)
+precis(m5.3)
 
 # stat halfeyes for params
 as_draws_df(m5.3) |> 
@@ -409,3 +416,484 @@ bind_rows(
 # but there are easier ways to begin to understand the implications of your parameters
 # in your model either through pure visualization of the fit to the data or 
 # through causal counterfactual type manipulations testing alternative data
+
+# can ask model for predictions not observed in data, more for causal analysis to 
+# probe model for answers in particular cases 
+
+# plotting model predictions ----------------------------------------------
+
+# run another model regressing m on a
+b5.4 <- brm(
+  data = d, 
+  family = gaussian,
+  m ~ 1 + a,
+  prior = c(prior(normal(0, 0.2), class = Intercept),
+            prior(normal(0, 0.5), class = b),
+            prior(exponential(1), class = sigma)),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  seed = 5,
+  file = "fits/b_5.04"
+)
+
+summary(b5.4)
+
+# predictor residual plots plot residuals of regressed model between predictors
+# to isolate effect of that regressed variable on outcome
+
+# get residuals with brms::residuals()
+r <- residuals(b5.4) |>
+  # To use this in ggplot2, we need to make it a tibble or data frame
+  data.frame() |> 
+  bind_cols(d)
+
+p3 <- r |> 
+  ggplot(aes(x = Estimate, y = d)) +
+  stat_smooth(method = "lm", fullrange = T,
+              color = "firebrick4", fill = "firebrick4", 
+              alpha = 1/5, linewidth = 1/2) +
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") +
+  geom_point(size = 2, alpha = 2/3, color = "firebrick4") +
+  geom_text_repel(data = r |> filter(Loc %in% c("WY", "ND", "ME", "HI", "DC")),  
+                  aes(label = Loc), 
+                  size = 3, seed = 5) +
+  scale_x_continuous(limits = c(-2, 2)) +
+  coord_cartesian(xlim = range(r$Estimate)) +
+  labs(x = "Marriage rate residuals",
+       y = "Divorce rate (std)") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+
+p3
+# plot shows how remaining information after conditioning on age results in no
+# relationship to outcome of interest
+
+# residuals are parameters, they are estimated by the model and therefore have 
+# uncertainty. may have seen residualized variables in models before, this is a 
+# mistake b/c that uncertainty is lost, this is more accurate description of the 
+# uncertainty in the residual predictor values
+r |>
+  ggplot(aes(x = Estimate, y = d)) +
+  stat_smooth(method = "lm", fullrange = T,
+              color = "firebrick4", fill = "firebrick4", 
+              alpha = 1/5, linewidth = 1/2) +
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") +
+  # The only change is here
+  geom_pointrange(aes(xmin = Q2.5, xmax = Q97.5),
+                  alpha = 2/3, color = "firebrick4") +
+  geom_text_repel(data = r |> filter(Loc %in% c("ID", "HI", "DC")),  
+                  aes(label = Loc), 
+                  size = 3, seed = 5) +
+  scale_x_continuous(limits = c(-2, 3)) +
+  coord_cartesian(xlim = range(r$Estimate),
+                  ylim = range(d$d)) +
+  labs(x = "Age at marriage residuals",
+       y = "Divorce rate (std)") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+
+# posterior prediction plot of predictions against 
+
+# brm fit of m5.3, can't figure out how to do the fitted for pure cmdstan obj rn
+b5.3 <- brm(
+  data = d, 
+  family = gaussian,
+  d ~ 1 + m + a,
+  prior = c(prior(normal(0, 0.2), class = Intercept),
+            prior(normal(0, 0.5), class = b),
+            prior(exponential(1), class = sigma)),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  seed = 5,
+  file = "fits/b_5.03"
+)
+
+# 
+f <- fitted(b5.3) |>
+  data.frame() |>
+  # Un-standardize the model predictions
+  mutate(across(.cols = -Est.Error, .fns = \(x) x * sd(d$Divorce) + mean(d$Divorce))) |> 
+  bind_cols(d) 
+
+f |>
+  ggplot(aes(x = Divorce, y = Estimate)) +
+  geom_abline(linetype = 2, color = "grey50", linewidth = 0.5) +
+  geom_point(size = 1.5, color = "firebrick4", alpha = 3/4) +
+  geom_linerange(aes(ymin = Q2.5, ymax = Q97.5),
+                 linewidth = 1/4, color = "firebrick4") +
+  geom_text(data = f |> filter(Loc %in% c("ID", "UT", "RI", "ME")),
+            aes(label = Loc), 
+            hjust = 1, nudge_x = - 0.25) +
+  labs(x = "Observed divorce", y = "Predicted divorce") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+
+# get model predictions from cmdstan model
+d_pred <- d |> 
+  cbind(
+    m5.3_quantities |> filter(str_detect(variable, 'prediction')) |> 
+      select(mean, q5, q95) |> 
+      rename(pred = mean)
+  )
+
+d_pred |>
+  ggplot(aes(x = Divorce, y = pred)) +
+  geom_abline(linetype = 2, color = "grey50", linewidth = 0.5) +
+  geom_point(size = 1.5, color = "firebrick4", alpha = 3/4) +
+  geom_linerange(aes(ymin = q5, ymax = q95),
+                 linewidth = 1/4, color = "firebrick4") +
+  labs(x = "Observed divorce", y = "Predicted divorce") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+
+
+# 2. masked relationships -------------------------------------------------
+
+data("milk", package = 'rethinking')
+
+d <- milk
+
+rm(milk)
+
+glimpse(d)
+
+# depending on physiological and developmental aspects of spp, likely to see differences
+# in milk production
+# what extent energy content of milk, measured here by kilocalories, is related 
+# to the percent of the brain mass that is neocortex
+
+# inspect primary vars defined by mcelreath
+d |> 
+  select(kcal.per.g, mass, neocortex.perc) |> 
+  pairs(col = 'firebrick4')
+
+# standardize and log transform mass
+d <- d |> 
+  mutate(
+    kcal.per.g_s     = (kcal.per.g - mean(kcal.per.g)) / sd(kcal.per.g), 
+    log_mass_s       = (log(mass) - mean(log(mass))) / sd(log(mass)), 
+    neocortex.perc_s = (neocortex.perc - mean(neocortex.perc, na.rm = T)) / sd(neocortex.perc, na.rm = T)
+  )
+
+# start with simple univariate regression
+# expression(kcal/g[i] ~ Normal(mu[i], sigma))
+# mu[i] = alpha + beta[cortex_percent]*cortex_percent[i]
+
+b5.5_draft <- brm(
+  data = d, 
+  family = gaussian,
+  kcal.per.g_s ~ 1 + neocortex.perc_s,
+  prior = c(
+    prior(normal(0, 1), class = Intercept), # slightly more permissive priors, but still informed
+    prior(normal(0, 1), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  seed = 5,
+  sample_prior = T, # get samples from prior
+  file = "fits/b_5.05_draft"
+)
+
+# got some rows that resulted in na's, model didn't return valid probability even 
+# for the starting param values, some spp are missing values for neocortex
+
+# use listwise deletion and feel bad about it, but learn better method in chap 15
+
+# complete case data
+dcc <- d |> 
+  drop_na(ends_with('_s')) # remove cases with any nas in our std vars
+
+nrow(d) - nrow(dcc)
+
+# update to refit model with new data
+b5.5_draft_cc <- update(
+  b5.5_draft,
+  newdata = dcc,
+  seed = 5,
+  file = "fits/b_5.05_draft_cc"
+)
+
+# avoids compilation just changing data
+
+# prior predictive check!
+set.seed(5)
+
+prior_draws(b5.5_draft_cc) |> # draw from priors, req sample_prior = T in model
+  slice_sample(n = 50) |> # grab random 50 preds
+  rownames_to_column() |> 
+  expand_grid(neocortex.perc_s = c(-2, 2)) |> # 2 values all thats needed for line
+  mutate(kcal.per.g_s = Intercept + b * neocortex.perc_s) |> # calc pred
+  
+  ggplot(aes(x = neocortex.perc_s, y = kcal.per.g_s)) +
+  geom_line(
+    aes(group = rowname), alpha = 0.4, color = "firebrick"
+  ) +
+  coord_cartesian(ylim = c(-2, 2)) +
+  labs(
+    x = "neocortex percent (std)",
+    y = "kilocal per g (std)",
+    subtitle = "Intercept ~ dnorm(0, 1)\nb ~ dnorm(0, 1)"
+  ) +
+  theme_bw() +
+  theme(panel.grid = element_blank()) 
+
+# prior looks bad! refit with more constrained priors
+summary(b5.5_draft_cc)
+
+detach(package:rethinking, unload = T)
+
+# fit 
+b5.5 <- brm(
+  data = dcc, 
+  family = gaussian,
+  kcal.per.g_s ~ 1 + neocortex.perc_s,
+  prior = c(prior(normal(0, 0.2), class = Intercept), # tighter priors
+            prior(normal(0, 0.5), class = b),
+            prior(exponential(1), class = sigma)),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  seed = 5,
+  sample_prior = T,
+  file = "fits/b_5.05"
+)
+
+# now check out the if the priors are more sensible
+set.seed(5)
+prior_draws(b5.5) |> 
+  slice_sample(n = 50) |> 
+  rownames_to_column() |> 
+  expand_grid(neocortex.perc_s = c(-2, 2)) |> 
+  mutate(kcal.per.g_s = Intercept + b * neocortex.perc_s) |> 
+  
+  ggplot(aes(x = neocortex.perc_s, y = kcal.per.g_s, group = rowname)) +
+  geom_line(alpha = 0.4, color = "firebrick") +
+  coord_cartesian(ylim = c(-2, 2)) +
+  labs(x = "neocortex percent (std)",
+       y = "kilocal per g (std)",
+       subtitle = "Intercept ~ dnorm(0, 0.2)\nb ~ dnorm(0, 0.5)") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+
+summary(b5.5) # not much different, but errors are tighter
+
+# create coef tab comparison for each models estimates
+# Wrangle
+bind_rows(as_draws_df(b5.5_draft_cc), as_draws_df(b5.5)) |> # combine draws
+  select(b_Intercept:sigma) |> # select pars
+  mutate(fit = rep(c("b5.5_draft", "b5.5"), each = n() / 2)) |> # create fit col
+  pivot_longer(-fit) |> # expand 
+  group_by(name, fit) |> 
+  
+  # get preds and pci
+  summarise(
+    mean = mean(value),
+    ll = quantile(value, prob = 0.025),
+    ul = quantile(value, prob = 0.975)
+  ) |> 
+  mutate(fit = factor(fit, levels = c("b5.5_draft", "b5.5"))) |> 
+  
+  # Plot
+  ggplot(aes(x = mean, y = fit, xmin = ll, xmax = ul)) +
+  geom_pointrange(color = "firebrick") +
+  geom_hline(yintercept = 0, alpha = 1/5, color = "firebrick") +
+  labs(x = "posterior", 
+       y = NULL) +
+  facet_wrap(~ name, ncol = 1) +
+  theme_bw() +
+  theme(axis.text.y = element_text(hjust = 0),
+        axis.ticks.y = element_blank(),
+        panel.grid = element_blank(),
+        strip.background = element_blank())
+
+# plot preds over raw data
+nd <- tibble(neocortex.perc_s = seq(from = -2.5, to = 2, length.out = 30))
+
+fitted(
+  b5.5, 
+  newdata = nd,
+  probs = c(0.025, 0.975, 0.25, 0.75) # 50% and 95% ci
+) |>
+  data.frame() |>
+  bind_cols(nd) |> 
+  
+  ggplot(aes(x = neocortex.perc_s, y = Estimate)) +
+  geom_ribbon(
+    aes(ymin = Q2.5, ymax = Q97.5),
+    alpha = 1 / 5,
+    fill = "firebrick"
+  ) +
+  geom_smooth(
+    aes(ymin = Q25, ymax = Q75),
+    stat = "identity",
+    alpha = 1 / 5,
+    color = "firebrick4",
+    fill = "firebrick4",
+    linewidth = 1 / 2
+  ) +
+  geom_point(
+    data = dcc,
+    aes(x = neocortex.perc_s, y = kcal.per.g_s),
+    color = "firebrick4",
+    size = 2
+  ) +
+  coord_cartesian(
+    xlim = range(dcc$neocortex.perc_s),
+    ylim = range(dcc$kcal.per.g_s)
+  ) +
+  labs(x = "neocortex percent (std)", y = "kilocal per g (std)") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+
+# now look at mass 
+b5.6 <- brm(
+  data = dcc, 
+  family = gaussian,
+  kcal.per.g_s ~ 1 + log_mass_s,
+  prior = c(prior(normal(0, 0.2), class = Intercept),
+            prior(normal(0, 0.5), class = b),
+            prior(exponential(1), class = sigma)),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  seed = 5,
+  sample_prior = T,
+  file = "fits/b_5.06")
+
+# plot pred over data
+nd <- tibble(log_mass_s = seq(from = -2.5, to = 2.5, length.out = 30))
+
+fitted(
+  b5.6,
+  newdata = nd,
+  probs = c(0.025, 0.975, 0.25, 0.75)
+) |>
+  data.frame() |>
+  bind_cols(nd) |>
+  
+  ggplot(aes(x = log_mass_s, y = Estimate)) +
+  geom_ribbon(
+    aes(ymin = Q2.5, ymax = Q97.5),
+    alpha = 1 / 5,
+    fill = "firebrick"
+  ) +
+  geom_smooth(
+    aes(ymin = Q25, ymax = Q75),
+    stat = "identity",
+    alpha = 1 / 5,
+    color = "firebrick4",
+    fill = "firebrick4",
+    linewidth = 1 / 2
+  ) +
+  geom_point(
+    data = dcc,
+    aes(y = kcal.per.g_s),
+    color = "firebrick4",
+    size = 2
+  ) +
+  coord_cartesian(
+    xlim = range(dcc$log_mass_s),
+    ylim = range(dcc$kcal.per.g_s)
+  ) +
+  labs(x = "log body mass (std)", y = "kilocal per g (std)") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+
+# multivariable model
+# include both additively into model
+b5.7 <- brm(
+  data = dcc, 
+  family = gaussian,
+  kcal.per.g_s ~ 1 + neocortex.perc_s + log_mass_s,
+  prior = c(prior(normal(0, 0.2), class = Intercept),
+            prior(normal(0, 0.5), class = b),
+            prior(exponential(1), class = sigma)),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  seed = 5,
+  file = "fits/b_5.07"
+)
+
+# compare model params from each fit to see revealed relationships of both
+# neocortex and body mass with milk nutritional content
+bind_cols(
+  as_draws_df(b5.5) |> 
+    transmute(`b5.5_beta[N]` = b_neocortex.perc_s),
+  as_draws_df(b5.6) |> 
+    transmute(`b5.6_beta[M]` = b_log_mass_s),
+  as_draws_df(b5.7) |> 
+    transmute(`b5.7_beta[N]` = b_neocortex.perc_s,
+              `b5.7_beta[M]` = b_log_mass_s)
+) |> 
+  pivot_longer(everything()) |> 
+  group_by(name) |> 
+  summarise(mean = mean(value),
+            ll   = quantile(value, prob = 0.025),
+            ul   = quantile(value, prob = 0.975)) |> 
+  separate(name, into = c("fit", "parameter"), sep = "_") |> 
+  
+  ggplot(aes(x = mean, y = fit, xmin = ll, xmax = ul)) +
+  geom_pointrange(color = "firebrick") +
+  geom_vline(xintercept = 0, alpha = 1/5, color = "firebrick") +
+  ylab(NULL) +
+  facet_wrap(~ parameter, ncol = 1, labeller = label_parsed) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        strip.background = element_rect(fill = "transparent", color = "transparent"))
+
+# look at the correlations again to start to unpack why these associations only appeared 
+# when modelled together
+library(GGally)
+
+dcc |> 
+  select(ends_with('_s')) |> 
+  ggpairs()
+
+# high correlation between predictors body mass and neocortex percentage but one
+# is negatively associated with milk richness (mass) and other positively (neo)
+
+# create some dags to see what is going on
+gg_dag <- function(d) {
+  d |> 
+    ggplot(aes(x = x, y = y, xend = xend, yend = yend)) +
+    geom_dag_point(alpha = 1/4, color = "firebrick", size = 10) +
+    geom_dag_text(color = "firebrick") +
+    geom_dag_edges(edge_color = "firebrick") +
+    scale_x_continuous(NULL, breaks = NULL, expand = c(0.1, 0.1)) +
+    scale_y_continuous(NULL, breaks = NULL, expand = c(0.2, 0.2)) +
+    theme_bw() +
+    theme(panel.grid = element_blank())
+}
+
+# Left DAG
+dag_coords <- tibble(
+  name = c("M", "N", "K"),
+  x    = c(1, 3, 2),
+  y    = c(2, 2, 1))
+
+p1 <- dagify(
+  N ~ M,
+  K ~ M + N,
+  coords = dag_coords) |>
+  gg_dag()
+
+# Middle DAG
+p2 <- dagify(
+  M ~ N,
+  K ~ M + N,
+  coords = dag_coords) |>
+  gg_dag()
+
+# Right DAG
+dag_coords <- tibble(
+  name = c("M", "N", "K", "U"),
+  x    = c(1, 3, 2, 2),
+  y    = c(2, 2, 1, 2))
+p3 <- dagify(
+  M ~ U,
+  N ~ U,
+  K ~ M + N,
+  coords = dag_coords) |>
+  gg_dag() +
+  geom_point(x = 2, y = 2,
+             color = "firebrick4", shape = 1, size = 10, stroke = 1.25)
+
+# combine
+p1 + p2 + p3
+
+# unfortunately for us, each of these dags imply same set of conditional independencies, 
+# making it impossible to tell from the data alone which one is better inference
+# this is known as markov equivalence in this lit
