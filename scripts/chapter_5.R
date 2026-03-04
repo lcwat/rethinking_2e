@@ -9,7 +9,7 @@
 # Load
 library(tidyverse)
 library(tidybayes)
-library(rstan)
+# library(rstan)
 library(patchwork)
 library(posterior)
 library(tigris)
@@ -32,7 +32,7 @@ d <- WaffleDivorce
 
 rm(WaffleDivorce)
 
-# standardize
+# standardize, also adds some metadata to those vars
 d <- d |> 
   mutate(d = rethinking::standardize(Divorce),
          m = rethinking::standardize(Marriage),
@@ -100,30 +100,30 @@ sd(d$MedianAgeMarriage)
 # which seems HUGE, so we set prior to make 1/-1 unlikely for beta
 
 # fit stan model
-model_code_5.1 <- '
-data {
-  int<lower=1> n;
-  vector[n] d;
-  vector[n] a;
-}
-parameters {
-  real b0;
-  real b2; 
-  real<lower=0> sigma; // set lower bound for variance
-}
-model {
-  vector[n] mu;
-  mu = b0 + b2 * a;
-  d ~ normal(mu, sigma);
-  b0 ~ normal(0, .2);
-  b2 ~ normal(0, .5);
-  sigma ~ exponential(1);
-}
-generated quantities {
-  vector[n] log_lik;
-  for(i in 1:n) log_lik[i] = normal_lpdf(d[i] | b0 + b2 * a[i], sigma);
-}
-'
+# model_code_5.1 <- '
+# data {
+#   int<lower=1> n;
+#   vector[n] d;
+#   vector[n] a;
+# }
+# parameters {
+#   real b0;
+#   real b2; 
+#   real<lower=0> sigma; // set lower bound for variance
+# }
+# model {
+#   vector[n] mu;
+#   mu = b0 + b2 * a;
+#   d ~ normal(mu, sigma);
+#   b0 ~ normal(0, .2);
+#   b2 ~ normal(0, .5);
+#   sigma ~ exponential(1);
+# }
+# generated quantities {
+#   vector[n] log_lik;
+#   for(i in 1:n) log_lik[i] = normal_lpdf(d[i] | b0 + b2 * a[i], sigma);
+# }
+# '
 
 # must make the stan data for the function
 stan_data <- d |> 
@@ -141,24 +141,24 @@ m5.1 <- stan(
 )
 
 # prior fit as separate model
-model_code_5.1_prior <- '
-data {
-  int<lower=1> n;
-  vector[n] d;
-  vector[n] a;
-}
-parameters {
-  real b0;
-  real b2;
-  real<lower=0> sigma;
-}
-model {
-  // The model only contains the prior
-  b0 ~ normal(0, 0.2);
-  b2 ~ normal(0, 0.5);
-  sigma ~ exponential(1);
-}
-'
+# model_code_5.1_prior <- '
+# data {
+#   int<lower=1> n;
+#   vector[n] d;
+#   vector[n] a;
+# }
+# parameters {
+#   real b0;
+#   real b2;
+#   real<lower=0> sigma;
+# }
+# model {
+#   // The model only contains the prior
+#   b0 ~ normal(0, 0.2);
+#   b2 ~ normal(0, 0.5);
+#   sigma ~ exponential(1);
+# }
+# '
 
 m5.1_prior <- stan(
   data = stan_data,
@@ -340,17 +340,41 @@ names(stan_data)[4] <- 'N'
 m5.3 <- cmdstan_model('scripts/stan/model_code_5.3.stan')
 
 m5.3 <- m5.3$sample(
-  stan_data, chains = 2, parallel_chains = 2, iter_warmup = 1500, iter_sampling = 2500
+  stan_data, chains = 2, parallel_chains = 2, iter_warmup = 1500, 
+  iter_sampling = 2500
 )
 
 # much faster! like the two step approach too
 
 # summary
-print(m5.3, pars = c("b0", "b1", "b2", "sigma"),  probs = c(0.055, 0.945))
-
 print(m5.3)
 
-# plot coef tabs
+# stat halfeyes for params
+as_draws_df(m5.3) |> 
+  select(b0:sigma) |> 
+  pivot_longer(
+    everything(), names_to = 'pars', values_to = 'draw'
+  ) |>
+  
+  ggplot(aes(x = draw, y = pars)) +
+  
+  geom_vline(xintercept = 0, color = 'black') +
+  
+  stat_halfeye(fill = 'firebrick') +
+  
+  scale_y_discrete(
+    labels = c(
+      'b0' = expression(b[0]), 
+      'b1' = expression(b[1]), 
+      'b2' = expression(b[2]), 
+      'sigma' = expression(sigma)
+    )
+  ) +
+  
+  labs(x = 'posterior', y = NULL)
+  
+
+# plot coef tab
 bind_rows(
   as_draws_df(m5.1) |> mutate(model = "m5.1"),
   as_draws_df(m5.3) |> mutate(model = "m5.3")
@@ -361,7 +385,8 @@ bind_rows(
   mutate(name = case_when(
     name == "b1" ~ "beta[1]",
     name == "b2" ~ "beta[2]"
-  ) |> factor(levels = c("beta[2]", "beta[1]"))) |> 
+  ) |> factor(levels = c("beta[2]", "beta[1]"))
+  ) |> 
   
   ggplot(aes(x = value, y = model)) +
   geom_vline(xintercept = 0, color = "white") +
@@ -369,3 +394,18 @@ bind_rows(
   labs(x = "posterior",
        y = NULL) +
   facet_wrap(~ name, labeller = label_parsed, ncol = 1)
+
+# assuming no confounding variables, parameter b1 implies that there is no 
+# direct causal path between m and d, it is spurious even though it is highly 
+# correlated
+
+# in multivariate models, have more options to interpret the posterior based on 
+# combinations of parameters
+
+# one option is to fit a model of each predictor onto one another and extract the 
+# residuals, then compare that to outcome to see if any remaining info from variable 
+# can relate to the outcome 
+
+# but there are easier ways to begin to understand the implications of your parameters
+# in your model either through pure visualization of the fit to the data or 
+# through causal counterfactual type manipulations testing alternative data
