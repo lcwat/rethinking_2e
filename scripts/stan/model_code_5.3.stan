@@ -45,9 +45,8 @@ model {
 // model comparison 
 generated quantities {
   // prediction quantities, without, can't generate fitted values
-  vector[N] linpred = b0 + b1*m + b2*a;
-  vector[N] epred = linpred; // apply link function here if needed
-  array[N] real prediction = normal_rng(epred, sigma);
+  vector[N] mu;
+  mu = b0 + b1*m + b2*a;
   
   // likelihoods for model comparison
   vector[N] log_lik;

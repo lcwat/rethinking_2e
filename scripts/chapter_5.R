@@ -897,3 +897,296 @@ p1 + p2 + p3
 # unfortunately for us, each of these dags imply same set of conditional independencies, 
 # making it impossible to tell from the data alone which one is better inference
 # this is known as markov equivalence in this lit
+
+# helpful to understand this masking with some simulation
+cases <- 100
+
+set.seed(5)
+
+# simulate a world where dag 1 is true
+p1
+
+d_sim <- tibble(m = rnorm(cases, mean = 0, sd = 1)) |> 
+  mutate(
+    n = rnorm(cases, mean = m, sd = 1), # listens to mass
+    k = rnorm(cases, mean = n - m, sd = 1) # listens to n, subtracting eff of m
+  )
+
+# see what we just did
+d_sim |> 
+  GGally::ggpairs()
+
+# load fit and use plug in simulated data to model
+b5.7 <- read_rds('fits/b_5.07.rds')
+
+fixef(b5.7) |> round(2)
+
+b5.7_sim <- update(
+  b5.7, 
+  newdata = d_sim, # plug in new data
+  formula = k ~ 1 + n + m, 
+  seed = 5, 
+  file = 'fits/b_5.07_sim'
+)
+
+b5.5_sim <- update(
+  b5.7, 
+  newdata = d_sim, # plug in new data
+  formula = k ~ 1 + n, 
+  seed = 5, 
+  file = 'fits/b_5.05_sim'
+)
+
+b5.6_sim <- update(
+  b5.7, 
+  newdata = d_sim, # plug in new data
+  formula = k ~ 1 + m, 
+  seed = 5, 
+  file = 'fits/b_5.06_sim'
+)
+
+# compare coef for each
+fixef(b5.5_sim) |> round(2)
+fixef(b5.6_sim) |> round(2)
+fixef(b5.7_sim) |> round(2)
+
+
+# 3 cats ------------------------------------------------------------------
+
+# discrete and unordered, how does outcome change with presence or absence of 
+# category? more confusing is model machinery behind how estimates are created
+# with these variables
+
+# go back to kalahari forager dataset
+data('Howell1', package = 'rethinking')
+d <- Howell1
+rm(Howell1)
+
+glimpse(d)
+
+# 1 when male, 0 when female, it is an indicator variable or dummy coded by default
+# turns parameter on and off depending on row value
+
+# model of height based on sex
+#' h[i] ~ N(mu[i], sigma)
+#' mu[i] = alpha + beta[i] * sex[i]
+#' alpha ~ N(178, 20)
+#' beta[m] ~ N(0, 10) // only influences height estimate when sex[i] = 1
+#' sigma ~ Uniform(0, 50)
+
+# alpha changes meaning, now is the estimated mean height for female instead of 
+# overall mean height of sample
+
+# another complication for bayesian model is that males have more uncertainty
+# than female mean estimate due to being additive of two parameters rather than one
+
+# better approach is the index variable, contains just arbitrary integers that 
+# correspond to different levels
+
+d <- d |> 
+  mutate(sex = if_else(male == 1, 2, 1))
+
+head(d)
+
+# update model with index var
+#' h[i] ~ N(mu[i], sigma)
+#' mu[i] = alpha[sex[i]] // vary alpha based on a[j]
+#' alpha[j] ~ N(178, 20)  for j = 1..2 // same prior for a[1] and a[2]
+#' sigma ~ Unif(0, 50)
+
+# to do this in brms, change sex to a factor
+d <- d |> 
+  mutate(sex = factor(sex))
+
+b5.8 <- brm(
+  data = d, 
+  family = gaussian,
+  height ~ 0 + sex,
+  prior = c(
+    prior(normal(178, 20), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  seed = 5,
+  file = "fits/b_5.08"
+)
+
+
+# stan --------------------------------------------------------------------
+
+# for index vars in stan model, a little different b/c stan doesn't allow ints
+# within their vectors, instead have to use array 
+# Index variable approach
+# model_code_5.8 <- '
+# data {
+#   int<lower=1> n;
+#   int<lower=1> n_sex; // var for number of levels
+#   vector[n] height;
+#   array[n] int sex; // array for sex ints
+# }
+# parameters {
+#   vector[n_sex] a;
+#   real<lower=0, upper=50> sigma;
+# }
+# model {
+#   height ~ normal(a[sex], sigma); // subset mu by sex
+#   
+#   a ~ normal(178, 20);
+#   
+#   // As an alternative, this syntax works in this example, 
+#   // and allows the prior to differ by level
+#   // a[1] ~ normal(178, 20);
+#   // a[2] ~ normal(178, 20);
+#   
+#   // This snytax does not work
+#   // a[sex] ~ normal(178, 20);
+#   
+#   sigma ~ uniform(0, 50);
+# }
+# '
+# 
+# # Dummy variable approach
+# model_code_5.8b <- '
+# data {
+#   int<lower=1> n;
+#   vector[n] height;
+#   vector[n] male; // just vector of continuous int values
+# }
+# parameters {
+#   real b0;
+#   real b1;
+#   real<lower=0, upper=50> sigma;
+# }
+# model {
+#   height ~ normal(b0 + b1 * male, sigma);
+#   
+#   b0 ~ normal(178, 20);
+#   b1 ~ normal(0, 10);
+#   sigma ~ uniform(0, 50);
+# }
+# '
+
+
+# -------------------------------------------------------------------------
+
+# view summary
+print(b5.8)
+
+# some more summary techniques harkening back to ch 2!
+get_variables(b5.8)
+
+gather_draws(b5.8, b_sex1, b_sex2, sigma) |> 
+  median_qi()
+
+# plot
+b5.8 |> 
+  gather_draws(b_sex1, b_sex2, sigma) |> 
+  median_hdci() |> 
+  ggplot(aes(y = .variable, x = .value, xmin = .lower, xmax = .upper)) +
+  geom_pointinterval()
+
+# more importantly, we are looking for a difference between these levels, which 
+# means that we should compute a contrast to pass along the uncertainty in the 
+# differences between the sexes in the outcome
+as_draws_df(b5.8) |> 
+  mutate(diff_fm = b_sex1 - b_sex2) |> 
+  pivot_longer(cols = c(b_sex1:sigma, diff_fm)) |> 
+  group_by(name) |> 
+  mean_qi(value, .width = 0.89)
+
+# halfeye plot
+as_draws_df(b5.8) |> 
+  mutate(diff = b_sex1 - b_sex2) |> # female to male contrast, should be neg
+  
+  ggplot(aes(x = diff)) +
+  stat_halfeye(fill = 'goldenrod') + 
+  geom_vline(xintercept = 0, alpha = 2/5, color = 'orchid') +
+  labs(y = 'density', x = 'contrast (female -> male)') +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+
+# real advantage of index approach is when there are more than 2 cats, as indicator
+# approach creates those dummy variables for k-1 levels like lm() default also
+# multilevel models demand them!
+
+# lets look at clade in milk data
+data('milk', package = 'rethinking')
+d <- milk
+rm(milk)
+
+levels(d$clade); d |> distinct(clade) # base vs tidyverse
+# 4 levels of primate clades
+
+# for brms, can keep this factor in tact and will work just fine as index
+
+# but still need to standardize outcome
+d <- d |> 
+  mutate(kcal_per_g_s = (kcal.per.g - mean(kcal.per.g)) / sd(kcal.per.g))
+
+glimpse(d)
+
+#' kcal[i] ~ N(mu[i], sigma)
+#' mu[i] = alpha[clade[i]] // mean for each clade level
+#' a[j] ~ N(0, 0.5)   for j = 1,..,4 // four levels/clades
+#' sigma ~ Exp(1)
+
+# brms model
+b5.9 <- brm(
+  data = d, 
+  family = gaussian,
+  kcal_per_g_s ~ 0 + clade, # use 0 and factor coding will be compiled into index
+  prior = c(
+    prior(normal(0, 0.5), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  seed = 5,
+  file = "fits/b_5.09"
+)
+
+# model in stan
+# model_code_5.9 <- '
+# data {
+#   int<lower=1> n;
+#   int<lower=1> n_clade_id;
+#   vector[n] k; // kcal
+#   array[n] int clade_id; // cat ints must be in array
+# }
+# parameters {
+#   vector[n_clade_id] a; // vector of clade indexed pars
+#   real<lower=0> sigma;
+# }
+# model {
+#   k ~ normal(a[clade_id], sigma); 
+#   
+#   a ~ normal(0, 0.5); // sets all priors at once, much easier
+#   sigma ~ exponential(1);
+# }
+# '
+
+# view summary
+print(b5.9)
+
+# plot coefs with convenience functions
+mcmc_plot(b5.9, variable = '^b_', regex = T)
+
+# or ground up ggplot and tidybayes approach
+b5.9 |> 
+  as_draws_df() |> 
+  select(starts_with('b')) |> 
+  set_names(distinct(d, clade) |> arrange(clade) |> pull()) |> # set colnames
+  pivot_longer(everything()) |> 
+  
+  # now plot
+  ggplot(aes(x = value, y = reorder(name, value))) +
+  geom_vline(xintercept = 0, color = 'mistyrose4', alpha = 2/5) +
+  stat_pointinterval(
+    point_interval = mode_hdi, .width = .89, color = 'peachpuff3', size = 1
+  ) +
+  labs(x = 'expected kcal (std)', y = NULL) +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank(), 
+    axis.ticks.y = element_blank(), 
+    axis.text.y = element_text(face = 'italic', hjust = 0)
+  )
